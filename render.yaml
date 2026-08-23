@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: sbir-dataset-quality-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /
+    autoDeployTrigger: commit
