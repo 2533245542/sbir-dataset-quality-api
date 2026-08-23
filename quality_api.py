@@ -201,7 +201,7 @@ def count_rows(table: str, dataset_key: str) -> int:
     ).fetchone()[0]
 
 
-@app.get("/", include_in_schema=False)
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 def root() -> dict[str, Any]:
     return {
         "name": f"{APP_NAME} API",
