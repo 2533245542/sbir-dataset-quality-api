@@ -34,7 +34,8 @@ chmod +x prepare_render_repo.sh
 脚本会自动：
 
 - 对 SQLite 数据库执行 integrity check。
-- 将约 228 MB 的 `api.db` 压缩成约 59 MB 的 `api.db.gz`。
+- 压缩 `api.db`，并将压缩文件拆成小于 GitHub 100 MiB 限制的 `api.db.gz.part-*` 分片。
+- 验证全部分片能够重新组合，并逐字节还原原始数据库。
 - 复制 `quality_api.py` 和 `requirements.txt`。
 - 生成 Render 专用 Dockerfile、`.dockerignore` 和 `.gitignore`。
 - 生成 `render.yaml`，让 Render Blueprint 自动配置 Free Web Service。
@@ -55,8 +56,8 @@ chmod +x prepare_render_repo.sh
 ## 0. 部署前要知道的事
 
 - 当前开发仓库仍然保持不变；测试部署使用脚本生成的独立个人仓库。
-- 原始数据库在 `../api_preprocess/output/api.db`，大约 228 MB。
-- 数据库 gzip 压缩后大约 59 MB，可以通过 GitHub 命令行正常提交，不需要 Git LFS。
+- 原始数据库在 `../api_preprocess/output/api.db`；具体大小会随 pipeline 更新。
+- 压缩数据库会被拆成若干个不超过 90 MiB 的分片，可以通过普通 Git 提交，不需要 Git LFS。
 - API 会公开数据、Swagger docs 和搜索接口。上线前应确认数据中没有不能公开的内容。
 - 当前 API 没有 API key、用户登录或应用内限流。对于 demo 没问题，但不应直接当作有 SLA 的生产服务。
 
@@ -80,14 +81,15 @@ sqlite3 ../api_preprocess/output/api.db "PRAGMA integrity_check;"
 ok
 ```
 
-### 1.2 生成压缩数据库
+### 1.2 生成并拆分压缩数据库
 
 ```bash
-gzip -9 -c ../api_preprocess/output/api.db > api.db.gz
-ls -lh api.db.gz
+gzip -9 -c ../api_preprocess/output/api.db > /tmp/api.db.gz
+split -b 90m /tmp/api.db.gz api.db.gz.part-
+ls -lh api.db.gz.part-*
 ```
 
-不要把原始的 `api.db` 复制进 GitHub repository；它超过 GitHub 普通 Git object 的 100 MiB 上限。
+不要把原始的 `api.db` 或完整的 `api.db.gz` 复制进 GitHub repository；单个文件可能超过 GitHub 普通 Git object 的 100 MiB 上限。通常应直接运行准备脚本，由脚本完成拆分及还原验证。
 
 ### 1.3 修改 Dockerfile
 
@@ -102,8 +104,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY quality_api.py .
-COPY api.db.gz .
-RUN gzip -d api.db.gz
+COPY api.db.gz.part-* /tmp/db-parts/
+RUN cat /tmp/db-parts/api.db.gz.part-* | gzip -dc > /app/api.db \
+    && rm -f /tmp/db-parts/api.db.gz.part-* \
+    && rmdir /tmp/db-parts
 
 ENV DB_PATH=/app/api.db
 ENV PYTHONUNBUFFERED=1
@@ -130,7 +134,7 @@ __pycache__
 data/
 ```
 
-不要在 `.dockerignore` 中忽略 `api.db.gz`。
+不要在 `.dockerignore` 中忽略 `api.db.gz.part-*`。
 
 ### 1.5 确认 Python dependencies
 
@@ -186,7 +190,7 @@ cd /Users/wz426/Desktop/sbir/imm_dataset_quality/absa_preprocess/api/sbir-datase
 ```bash
 git init -b main
 git add Dockerfile .dockerignore .gitignore render.yaml \
-  requirements.txt quality_api.py api.db.gz DEPLOY.md
+  requirements.txt quality_api.py api.db.gz.part-* DEPLOY.md
 git status --short
 git commit -m "Deploy dataset quality API on Render"
 git remote add origin https://github.com/<your-account>/sbir-dataset-quality-api.git
@@ -197,7 +201,7 @@ git push -u origin main
 
 ```bash
 git add Dockerfile .dockerignore .gitignore render.yaml \
-  requirements.txt quality_api.py api.db.gz DEPLOY.md
+  requirements.txt quality_api.py api.db.gz.part-* DEPLOY.md
 git status --short
 git commit -m "Deploy dataset quality API on Render"
 git push -u origin main
@@ -207,10 +211,10 @@ git push -u origin main
 
 - 当前 GitHub 用户是否登录，并且对这个个人 repository 有 write permission。
 - Git credential 或 SSH key 是否有效。
-- `api.db.gz` 是否确实小于 100 MiB。
+- 每个 `api.db.gz.part-*` 是否确实小于 100 MiB。
 - 是否误加了未压缩的 `api.db`。
 
-GitHub 上最终应能在 `main` 分支看到 Dockerfile、`render.yaml`、`quality_api.py` 和 `api.db.gz`。
+GitHub 上最终应能在 `main` 分支看到 Dockerfile、`render.yaml`、`quality_api.py` 和全部 `api.db.gz.part-*` 分片。
 
 ## 4. 在 Render 使用 Blueprint 创建 Web Service
 
@@ -240,7 +244,7 @@ Render 的构建日志应当依次显示：
 
 ```text
 pip install requirements
-copy and decompress api.db.gz
+copy, combine, and decompress api.db.gz.part-*
 start uvicorn
 Loaded 87612 dataset names from /app/api.db
 ```
@@ -313,7 +317,7 @@ Render 会自动重新构建和部署。
 cd /Users/wz426/Desktop/sbir/imm_dataset_quality/absa_preprocess/api/sbir-project-api-wz
 ./prepare_render_repo.sh --force /path/to/my-personal-repo
 cd /path/to/my-personal-repo
-git add api.db.gz
+git add api.db.gz.part-*
 git commit -m "Update dataset quality database"
 git push origin main
 ```
@@ -326,8 +330,8 @@ git push origin main
 
 检查：
 
-- GitHub 分支中是否有真正的 `api.db.gz`，而不是 Git LFS pointer。
-- Dockerfile 是否执行了 `RUN gzip -d api.db.gz`。
+- GitHub 分支中是否有完整的一组 `api.db.gz.part-*` 分片。
+- Dockerfile 是否按文件名顺序拼接并解压全部分片。
 - `DB_PATH` 是否是 `/app/api.db`。
 
 ### Render 报 `No open ports detected`
@@ -341,7 +345,7 @@ git push origin main
 
 ### GitHub 拒绝大文件
 
-不要提交 `api.db`。只提交小于 100 MiB 的 `api.db.gz`。
+不要提交 `api.db` 或完整的 `api.db.gz`。只提交每个均小于 100 MiB 的 `api.db.gz.part-*` 分片。
 
 ### Render 启动后马上终止
 

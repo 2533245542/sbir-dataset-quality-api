@@ -4,4 +4,5 @@ __pycache__/
 .env
 .DS_Store
 api.db
+api.db.gz
 api.db.gz.new
